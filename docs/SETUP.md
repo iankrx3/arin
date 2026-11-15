@@ -43,7 +43,7 @@ Expo Go는 쓰지 않는다. 결제·카카오 로그인·백그라운드 오디
 | `SUPABASE_JWT_SECRET` | API | 레거시 HS256 서명일 때만. 비대칭 서명 키를 쓰는 프로젝트는 JWKS 엔드포인트로 검증 |
 | `GEMINI_API_KEY`, `GEMINI_STORY_MODEL`, `GEMINI_SAFETY_MODEL` | API | 출시 전에는 유료 티어 키. 개발 중 무료 키는 가짜 프로필로만 시험(D-45). 모델을 비우면 `gemini-3.6-flash`·`gemini-3.1-flash-lite` |
 | `GEMINI_MODE`, `TTS_MODE` | API | 글(Gemini)·음성을 따로 `live`/`mock`으로. 비우면 `PROVIDER_MODE`를 따른다. 예: ElevenLabs 전에는 `GEMINI_MODE=live`, `TTS_MODE=mock` |
-| `GEMINI_DAILY_CALL_LIMIT` | API | 서버 전체 하루(UTC) Gemini 호출 상한, 기본 50. 넘으면 스토리는 `AI_BUSY` |
+| `GEMINI_DAILY_CALL_LIMIT` | API | 서버 전체 하루(UTC) Gemini 호출 상한, 기본 50. 넘으면 스토리는 `AI_BUSY`. 키 한도(429)가 이 프로세스에서 3번이면 그 뒤로는 호출하지 않는다(D-53). 서버를 다시 띄우면 풀린다 |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_WEBHOOK_SECRET`, `ELEVENLABS_*_MODEL` | API | 음성은 `ELEVENLABS_STORY_MODEL`(기본 `eleven_v3`) 하나로 만든다. 키 확인은 `pnpm --filter @eloria/api tts:check`(사용량·보이스 목록, 크레딧 안 씀), `--say "문장"`으로 샘플 1개 |
 | `ELEVENLABS_DEFAULT_VOICE_ID` | API | `TTS_MODE=live`에 필수. voices의 자리 보이스(`mock-*`)·보이스 미선택일 때 쓴다(Q-08 전까지) |
 | `ELEVENLABS_MAX_CREDITS_PER_CALL`, `ELEVENLABS_MONTHLY_CREDIT_LIMIT` | API | 음성 크레딧 상한, 기본 1,000·10,000(무료 플랜, D-49). 넘으면 ElevenLabs를 부르지 않고 스토리는 글만(`text_ready` + `TTS_BUDGET`) |

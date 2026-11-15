@@ -6,7 +6,7 @@
 
 | 용도 | 환경 변수 | 기본값 | 비고 |
 | --- | --- | --- | --- |
-| 장면 계획·스토리·확언 | `GEMINI_STORY_MODEL` | `gemini-3.6-flash` | 안정판. 아린 이야기 작성만 생각 수준 high·타임아웃 120초(D-50). 그 외 글 호출은 low, 검수는 minimal, 타임아웃 60초 |
+| 장면 계획·스토리·확언 | `GEMINI_STORY_MODEL` | `gemini-3.6-flash` | 안정판. 글 호출은 생각 수준 low, 검수는 minimal, 타임아웃 60초(D-52). 아린 이야기 출력 상한은 16,000토큰 |
 | 안전 검수·분류 | `GEMINI_SAFETY_MODEL` | `gemini-3.1-flash-lite` | JSON 출력, 생각 수준 minimal |
 | 스토리 음성 | `ELEVENLABS_STORY_MODEL` | `eleven_v3` | 요청당 5,000자 한도, 요청 스티칭 불가 |
 | 짧은 음성(확언·데일리 후보) | `ELEVENLABS_SHORT_MODEL` | `eleven_flash_v2_5` | 비용·크레딧 절반(글자당 0.5크레딧), 40,000자 |
@@ -15,7 +15,7 @@
 
 모델 ID는 자주 바뀌므로 구현 시 공식 문서에서 다시 확인한다. 출시·실사용자 데이터에는 유료 티어 키만 쓴다(무료 티어 입력은 Google 제품 개선에 쓰일 수 있음). 개발 중 무료 키는 가짜 프로필 시험에만 쓴다(D-45).
 
-어댑터(`packages/providers/src/gemini`)는 `@google/genai`의 `generateContent`에 `responseJsonSchema`(zod `toJSONSchema`)로 구조화 출력을 받는다. 재시도(408·429·5xx, 최대 3회)와 타임아웃(기본 60초)은 SDK `httpOptions`가 하고, 아린 이야기 작성만 요청마다 120초를 넣는다. JSON이 스키마에 안 맞으면 어댑터가 한 번만 다시 부른다. 출력 토큰에는 생각 토큰을 더해 비용을 계산한다. 생각 과정(`thought`)은 버리고 본문만 JSON으로 파싱한다. 테스트와 `eval:story`는 기본으로 Gemini를 부르지 않는다(`eval:story --live` 필요, `--max-calls` 기본 150). `eval:story`와 라이브러리는 아래 4.1~4.2를 그대로 쓴다.
+어댑터(`packages/providers/src/gemini`)는 `@google/genai`의 `generateContent`에 `responseJsonSchema`(zod `toJSONSchema`)로 구조화 출력을 받는다. 재시도(408·5xx, 최대 3회)와 타임아웃(기본 60초)은 SDK `httpOptions`가 한다. 429(키 한도)는 다시 치지 않는다. 이 프로세스가 한도 오류를 3번 받으면 그 다음 호출은 네트워크 없이 막는다(D-53). JSON이 스키마에 안 맞으면 어댑터가 한 번만 다시 부른다. 출력 토큰에는 생각 토큰을 더해 비용을 계산한다. 생각 과정(`thought`)은 버리고 본문만 JSON으로 파싱한다. 테스트와 `eval:story`는 기본으로 Gemini를 부르지 않는다(`eval:story --live` 필요, `--max-calls` 기본 150). `eval:story`와 라이브러리는 아래 4.1~4.2를 그대로 쓴다.
 
 ## 2. 파이프라인 단계
 
@@ -125,10 +125,10 @@ SafetyVerdict = {
 
 오늘의 이야기, 고른 장면이 있는 직접 소원, 수정만 이 경로다. 라이브러리와 퀴즈 직후 첫 이야기(vision 없음, 수정 아님)는 4.1~4.2다.
 
-- 모델은 `GEMINI_STORY_MODEL`(기본 `gemini-3.6-flash`). 생각 수준 `high`, `maxOutputTokens` 16000, 타임아웃 120초, `responseMimeType: application/json`.
-- 시스템 문장은 인수인계 9절 전문이다(`packages/prompts/src/arin-story/pending.ts`). 10절·11절은 넣지 않고, 문장을 지어 보태지 않는다.
+- 모델은 `GEMINI_STORY_MODEL`(기본 `gemini-3.6-flash`). 생각 수준 `low`, `maxOutputTokens` 16000, 타임아웃 60초, `responseMimeType: application/json`(D-52).
+- 시스템 문장은 인수인계 9절 전문이다(`packages/prompts/src/arin-story/pending.ts`). 10절·11절은 넣지 않고, 문장을 지어 보태지 않는다. 사물·장소·회사·시험 이름만 본문에서 3번이다(D-55). 사람 이름은 10~14번 그대로다.
 - 사용자 메시지는 `[사용자 정보]\n` 뒤에 JSON이다. `recent_lines`와 `wish_facts`는 있을 때만 넣고, 나머지 키는 값이 없어도 남긴다. `today_wish`는 오늘의 이야기이면 퀴즈의 소원, 직접 소원·수정이면 적은 문장이다. 사랑 질문을 건너뛰면 `love_included`는 false이고 `desired_love`·`specific_person`은 빈 문자열이다. `recent_lines`는 최근 준비된 이야기 3편의 제목·따옴표 대사·마지막 확언이다. 고른 장면은 JSON 안이 아니라 메시지 끝 `[선택한 장면]`이다.
-- 저장 전 검사(`arinStorySchema`): `title`(30자, 줄바꿈 포함)·`theme`(합격·내집·커리어·돈·차·사랑·결혼·건강·여행·자신감·기타)·`image_hint`·`paragraphs`(문장 배열의 배열, 16~20문단, 문단마다 1~3문장, 문장 60자)·`affirmations`(3개, 각 40자). 본문은 문단 문장을 이어 공백을 뺀 길이가 1,400~1,600자다. 마지막 문단은 따옴표로 감싼 확언 1문장. `image_hint`는 penthouse·dressroom·contract·cafe·coffee·dinner·wedding·paris·jeju·yoga·brunch·drive 중 하나. 이름 횟수는 검사하지 않는다. 스키마가 어긋나면 어댑터가 1번 다시 생성하고, 그래도 실패면 한도를 차감하지 않는다.
+- 저장 전 검사(`arinStorySchema`, D-54): 프롬프트는 9절 그대로(16~20문단, 1,400~1,600자, 문장 60자, 마지막 문단 따옴표 확언)이고, 검사는 그보다 넓다. 먼저 정리한다. 한 항목에 여러 문장이 있으면 나누고, 빈 문장·문단은 버리고, 3문장을 넘는 문단은 3문장씩 나눈다. 목록 밖 `theme`은 `기타`, 목록 밖 `image_hint`는 `cafe`로 바꾸고, 확언은 3~6개를 받아 앞의 3개를 쓴다. 정리한 뒤 거절하는 경우는 이것뿐이다: `title`이 비었거나 50자 초과, 문단 수가 10~26 밖, 문장 160자 초과, 본문(공백 제외)이 1,000~2,000자 밖, 확언이 3개 미만이거나 80자 초과. 마지막 문단 따옴표는 검사하지 않는다. 2,000자 상한은 공백 포함 약 2,450자로, 음성 회당 크레딧 상한 안에 들게 둔 값이다. 모델에는 정리 전 모양의 JSON Schema(`io: input`)를 보내고, `BAD_OUTPUT` 메시지에는 어긋난 필드(최대 3개)를 남긴다. `image_hint`는 penthouse·dressroom·contract·cafe·coffee·dinner·wedding·paris·jeju·yoga·brunch·drive 중 하나. 이름 횟수는 검사하지 않는다. 스키마가 어긋나면 어댑터가 1번 다시 생성하고, 그래도 실패면 한도를 차감하지 않는다.
 - 안전 검수(`safety@v1`)는 한 문단의 문장을 공백으로 잇고 문단 사이는 빈 줄인 글에 한다. rewrite면 이유와 방금 쓴 JSON을 넘겨 1번 다시 쓴다. block은 한도를 차감하지 않는다.
 - 본문은 그 형태로 `stories.script`에 둔다. JSON 원문은 `stories.arin_story`에 둔다. `scene_plan`은 null, `prompt_version`은 `arin-story@v1`(라이브러리의 `STORY_PROMPT_VERSION`과 섞지 않는다). `image_hint`·`affirmations` 컬럼에 같이 저장한다.
 - 음성은 `eleven_v3`, `POST /v1/text-to-speech/{voice_id}`다. 글자별 시간은 받지 않는다. 자막은 문장 한 줄이고, 하이라이트는 글자 수 비율이다. 1,400~1,600자는 회당 1,000크레딧을 넘는 일이 많아 `text_ready` + `TTS_BUDGET`으로 끝날 수 있다(D-49 상한은 그대로).
@@ -157,7 +157,7 @@ SafetyVerdict = {
 | `MAX_CONCURRENT_TTS` | 8 | ElevenLabs 플랜 동시성보다 낮게 |
 | `ELEVENLABS_MAX_CREDITS_PER_CALL` | 1,000 | 음성 1회 크레딧 상한(env). 크레딧 = 글자 수 × 모델 배수(v3·Multilingual v2 = 1, Flash·Turbo v2.5 = 0.5). 넘으면 호출하지 않는다(D-49) |
 | `ELEVENLABS_MONTHLY_CREDIT_LIMIT` | 10,000 | 이번 달(UTC) 음성 크레딧 상한(env). `generation_jobs`의 elevenlabs 행으로 센다. 무료 플랜 월 한도 |
-| `GEMINI_DAILY_CALL_LIMIT` | 50 | 서버 전체 하루(UTC) Gemini 호출 상한(env). `generation_jobs`의 gemini 행과 이 프로세스가 가져간 수 중 큰 값으로 센다. 무료 쿼터 보호(D-45) |
+| `GEMINI_DAILY_CALL_LIMIT` | 50 | 서버 전체 하루(UTC) Gemini 호출 상한(env). `generation_jobs`의 gemini 행과 이 프로세스가 가져간 수 중 큰 값으로 센다. 무료 쿼터 보호(D-45). 429가 이 프로세스에서 3번이면 그 뒤 호출은 막는다(D-53) |
 | `CUSTOM_WISHES_PER_DAY` | 3 | 직접 소원(이야기를 시작한 것)과 수정. 한국 시간 자정. 진행 중은 포함하고 실패는 빼며, 오늘의 이야기와 장면 없는 첫 이야기는 세지 않는다(D-50) |
 
 ### 단위 원가(2026-09 기준, 출시 전 재확인)
@@ -171,7 +171,7 @@ SafetyVerdict = {
 
 `est_cost_usd`는 어댑터가 위 단가 표(`packages/providers/src/pricing.ts`)로 계산해 `generation_jobs`에 기록한다. 라이브러리·첫 이야기의 5분 분량(3,200자)은 v3 회당 1,000크레딧을 넘는다(D-49).
 
-아린 이야기(D-50) 글 비용은 Flash와 생각 수준 high 기준 약 35원(오늘의 이야기), 직접 소원 1회(장면 미리보기 + 본문)는 약 50원으로 본다. 음성은 Turbo로 바꾸지 않는다. 긴 글은 크레딧 상한 때문에 만들어지지 않는 일이 많아, 그때 음성 비용은 나가지 않는다. 주 9,900원 구독의 순수입은 부가세와 스토어 수수료를 빼면 약 7,650원이다. 페이월에 보이는 월 9,900원·연 59,000원은 바꾸지 않는다.
+아린 이야기(D-50) 글 비용은 생각 수준 high일 때 약 35원(오늘의 이야기), 직접 소원 1회(장면 미리보기 + 본문)는 약 50원으로 잡았다. 지금은 생각 수준 low라 생각 토큰이 줄어 글 비용은 그보다 낮다(D-52). 음성은 Turbo로 바꾸지 않는다. 긴 글은 크레딧 상한 때문에 만들어지지 않는 일이 많아, 그때 음성 비용은 나가지 않는다. 주 9,900원 구독의 순수입은 부가세와 스토어 수수료를 빼면 약 7,650원이다. 페이월에 보이는 월 9,900원·연 59,000원은 바꾸지 않는다.
 
 ## 7. 음성·이미지 세부
 

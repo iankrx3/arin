@@ -5,13 +5,17 @@ import { createProviders } from '../index';
 import { resolveProviderModes } from '../mode';
 import { createDailyBudget, createMemoryBudget } from './budget';
 import {
-  ARIN_STORY_TIMEOUT_MS,
   createGeminiStoryModel,
   createGeminiVisionModel,
   ProviderError,
   type GeminiGenerate,
   type GeminiRequest,
 } from './gemini';
+import {
+  createGeminiQuotaBreaker,
+  GEMINI_QUOTA_FAILURE_LIMIT,
+  GEMINI_RETRY_STATUS_CODES,
+} from './quota-breaker';
 
 const MODELS = { story: 'gemini-3.6-flash', safety: 'gemini-3.1-flash-lite' };
 
@@ -66,6 +70,12 @@ describe('createGeminiStoryModel', () => {
     await expect(model.reviewSafety('...', 'dream')).rejects.toMatchObject({ code: 'BAD_OUTPUT' });
   });
 
+  it('BAD_OUTPUT 메시지에 어긋난 필드를 남긴다', async () => {
+    const fake = fakeGemini(['not json', '{"verdict":"maybe"}']);
+    const model = createGeminiStoryModel({ generate: fake.generate, models: MODELS });
+    await expect(model.reviewSafety('...', 'dream')).rejects.toThrow(/verdict/);
+  });
+
   it('스토리는 story 모델의 텍스트를 다듬어 돌려준다', async () => {
     const fake = fakeGemini(['  서아 님, 천천히 눈을 떠 보세요.  ']);
     const model = createGeminiStoryModel({ generate: fake.generate, models: MODELS });
@@ -86,7 +96,7 @@ describe('createGeminiStoryModel', () => {
     expect(fake.calls[0]?.thinking).toBe('low');
   });
 
-  it('이야기 JSON은 story 모델, 사고 수준 high, 120초로 받는다', async () => {
+  it('이야기 JSON은 story 모델, 사고 수준 low, 기본 타임아웃으로 받는다', async () => {
     const sample = sampleArinStory();
     const fake = fakeGemini([JSON.stringify(sample)]);
     const model = createGeminiStoryModel({ generate: fake.generate, models: MODELS });
@@ -115,11 +125,16 @@ describe('createGeminiStoryModel', () => {
     expect(story.title).toBe(sample.title);
     expect(fake.calls[0]).toMatchObject({
       model: 'gemini-3.6-flash',
-      thinking: 'high',
-      timeoutMs: ARIN_STORY_TIMEOUT_MS,
+      thinking: 'low',
       maxOutputTokens: 16_000,
     });
+    expect(fake.calls[0]?.timeoutMs).toBeUndefined();
     expect(fake.calls[0]?.messages.user.startsWith('[사용자 정보]')).toBe(true);
+    // 정리(transform)가 있는 스키마도 정리 전 모양의 JSON Schema로 보낸다.
+    expect(fake.calls[0]?.jsonSchema).toMatchObject({
+      type: 'object',
+      required: expect.arrayContaining(['title', 'paragraphs', 'affirmations']),
+    });
   });
 
   it('장면 미리보기는 사용자 정보와 생각 수준 low로 받는다', async () => {
@@ -157,7 +172,9 @@ describe('createGeminiStoryModel', () => {
     expect(set.scenes).toHaveLength(4);
     expect(fake.calls[0]).toMatchObject({ model: 'gemini-3.6-flash', thinking: 'low' });
     expect(fake.calls[0]?.timeoutMs).toBeUndefined();
-    expect(fake.calls[0]?.messages.system.startsWith('너는 ARIN(아린)의 이야기 작가다.')).toBe(true);
+    expect(fake.calls[0]?.messages.system.startsWith('너는 ARIN(아린)의 이야기 작가다.')).toBe(
+      true,
+    );
     expect(fake.calls[0]?.messages.user.startsWith('[사용자 정보]')).toBe(true);
   });
 
@@ -200,6 +217,23 @@ describe('createDailyBudget', () => {
     await expect(budget.take()).rejects.toBeInstanceOf(ProviderError);
     now = new Date('2026-11-13T00:01:00Z');
     await expect(budget.take()).resolves.toBeUndefined();
+  });
+});
+
+describe('Gemini 키 한도 차단', () => {
+  it('429는 SDK가 다시 치지 않는다', () => {
+    expect(GEMINI_RETRY_STATUS_CODES).not.toContain(429);
+  });
+
+  it('한도 오류 3번까지 시도하고 그 다음부터 막는다', () => {
+    const quota = createGeminiQuotaBreaker();
+    expect(quota.isBlocked()).toBe(false);
+    for (let i = 1; i < GEMINI_QUOTA_FAILURE_LIMIT; i += 1) {
+      expect(quota.recordFailure()).toBe(false);
+      expect(quota.isBlocked()).toBe(false);
+    }
+    expect(quota.recordFailure()).toBe(true);
+    expect(quota.isBlocked()).toBe(true);
   });
 });
 

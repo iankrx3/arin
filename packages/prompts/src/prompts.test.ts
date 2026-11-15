@@ -300,6 +300,8 @@ describe('arin story prompt', () => {
   it('9번 본문을 그대로 두고 10절은 넣지 않는다', () => {
     expect(ARIN_STORY_SYSTEM).toContain('[입력]');
     expect(ARIN_STORY_SYSTEM).toContain('공백 제외 1,400~1,600자');
+    expect(ARIN_STORY_SYSTEM).toContain('사물·장소·회사·시험 이름은 본문에서 3번');
+    expect(ARIN_STORY_SYSTEM).not.toContain('6~8번');
     expect(ARIN_STORY_SYSTEM).toContain('\\n');
     expect(ARIN_STORY_SYSTEM).not.toContain('[수정 모드]');
     expect(ARIN_STORY_SYSTEM).not.toContain('작업 체크리스트');

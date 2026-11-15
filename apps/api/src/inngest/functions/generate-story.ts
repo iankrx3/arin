@@ -5,10 +5,12 @@ import {
   type PipelineDeps,
 } from '../../pipeline/story-pipeline';
 import { inngest } from '../client';
+import { guardBudget } from '../guard';
 
 /**
  * story/generate.requested → 스토리 생성(docs/API.md 4절).
  * 사용자당 동시 2개, 전체 동시성은 TTS 플랜 한도 이하(MAX_CONCURRENT_TTS), 단계별 재시도 3회.
+ * 키 한도로 막히면(BUDGET_EXCEEDED) 다시 시도하지 않는다.
  */
 export function createGenerateStory(deps: PipelineDeps) {
   return inngest.createFunction(
@@ -24,7 +26,7 @@ export function createGenerateStory(deps: PipelineDeps) {
     },
     async ({ event, step }) => {
       const data = storyGenerateRequestedSchema.parse(event.data);
-      return runStoryPipeline(deps, data, (id, fn) => step.run(id, fn) as never);
+      return runStoryPipeline(deps, data, (id, fn) => step.run(id, () => guardBudget(fn)) as never);
     },
   );
 }

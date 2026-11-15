@@ -7,6 +7,7 @@ import {
   type PipelineDeps,
 } from '../../pipeline/story-pipeline';
 import { inngest } from '../client';
+import { guardBudget } from '../guard';
 
 /**
  * library/seed.requested(관리자, 수동) → 카탈로그에서 없는 리추얼 항목을 만들고 한 편씩 생성 이벤트를 보낸다
@@ -50,7 +51,7 @@ export function createGenerateLibraryStory(deps: PipelineDeps) {
       return runStoryPipeline(
         { repo: deps.repo, providers: deps.providers },
         data,
-        (id, fn) => step.run(id, fn) as never,
+        (id, fn) => step.run(id, () => guardBudget(fn)) as never,
       );
     },
   );

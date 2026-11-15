@@ -22,6 +22,12 @@ import { ApiError, GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { z } from 'zod';
 import { estimateGeminiCostUsd } from '../pricing';
 import type { AffirmationModel, LifestyleModel, StoryModel, Usage, VisionModel } from '../types';
+import {
+  createGeminiQuotaBreaker,
+  GEMINI_QUOTA_FAILURE_LIMIT,
+  GEMINI_RETRY_STATUS_CODES,
+  geminiQuotaBlockMessage,
+} from './quota-breaker';
 
 /** 공급자 호출 실패. code로 재시도·사용자 안내를 고른다. */
 export class ProviderError extends Error {
@@ -67,14 +73,13 @@ const THINKING: Record<GeminiRequest['thinking'], ThinkingLevel> = {
   high: ThinkingLevel.HIGH,
 };
 
-/** 이야기 JSON 한 편. 사고 수준이 높아 60초를 넘길 수 있다. */
-export const ARIN_STORY_TIMEOUT_MS = 120_000;
-
 /**
- * `@google/genai` 호출. 재시도(408·429·5xx, 최대 3회)와 타임아웃은 SDK의 httpOptions로 맡긴다.
+ * `@google/genai` 호출. 재시도(408·5xx, 최대 3회)와 타임아웃은 SDK의 httpOptions로 맡긴다.
+ * 429(키 한도)는 다시 치지 않는다. 이 프로세스에서 3번 실패하면 그 다음부터는 네트워크를 부르지 않는다.
  * 출력 토큰에는 생각(thinking) 토큰을 더한다. 같은 단가로 청구된다.
  */
 export function createGenAiGenerate(opts: { apiKey: string; timeoutMs?: number }): GeminiGenerate {
+  const quota = createGeminiQuotaBreaker();
   const ai = new GoogleGenAI({
     apiKey: opts.apiKey,
     httpOptions: {
@@ -82,11 +87,14 @@ export function createGenAiGenerate(opts: { apiKey: string; timeoutMs?: number }
       retryOptions: {
         attempts: 3,
         initialDelay: 2,
-        httpStatusCodes: [408, 429, 500, 502, 503, 504],
+        httpStatusCodes: [...GEMINI_RETRY_STATUS_CODES],
       },
     },
   });
   return async (req) => {
+    if (quota.isBlocked()) {
+      throw new ProviderError('BUDGET_EXCEEDED', geminiQuotaBlockMessage());
+    }
     try {
       const res = await ai.models.generateContent({
         model: req.model,
@@ -110,8 +118,17 @@ export function createGenAiGenerate(opts: { apiKey: string; timeoutMs?: number }
       };
     } catch (error) {
       if (error instanceof ApiError) {
+        if (error.status === 429) {
+          const blocked = quota.recordFailure();
+          throw new ProviderError(
+            blocked ? 'BUDGET_EXCEEDED' : 'RATE_LIMITED',
+            blocked
+              ? geminiQuotaBlockMessage(GEMINI_QUOTA_FAILURE_LIMIT)
+              : `gemini ${error.status}: ${error.message.slice(0, 200)}`,
+          );
+        }
         throw new ProviderError(
-          error.status === 429 ? 'RATE_LIMITED' : 'UPSTREAM',
+          'UPSTREAM',
           `gemini ${error.status}: ${error.message.slice(0, 200)}`,
         );
       }
@@ -132,6 +149,26 @@ const MAX_OUTPUT = {
   lifestyle: 600,
   vision: 1_500,
 } as const;
+
+/**
+ * 모델에 보낼 JSON Schema. 정리(transform)가 있는 스키마는 출력 모양을 JSON Schema로 못 그리므로
+ * 정리 전 입력 모양(io: input)을 보낸다. 나머지는 지금처럼 출력 모양이다.
+ */
+export function toGeminiJsonSchema(schema: z.ZodType) {
+  try {
+    return z.toJSONSchema(schema);
+  } catch {
+    return z.toJSONSchema(schema, { io: 'input' });
+  }
+}
+
+/** 실패 이유를 오류 메시지에 남긴다(경로: 메시지, 최대 3개). */
+function describeIssues(error: z.ZodError) {
+  return error.issues
+    .slice(0, 3)
+    .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+    .join('; ');
+}
 
 /**
  * 공통 실행: 상한 확인 → 호출 → (JSON이면) 스키마 검증. 형식이 틀리면 한 번만 다시 부른다.
@@ -169,12 +206,15 @@ export function createGeminiRunner(generate: GeminiGenerate, budget?: CallBudget
       return { text, usage };
     },
     async json<S extends z.ZodType>(schema: S, req: Omit<GeminiRequest, 'jsonSchema'>) {
-      const full = { ...req, jsonSchema: z.toJSONSchema(schema) };
+      const full = { ...req, jsonSchema: toGeminiJsonSchema(schema) };
       const parse = (text: string) => {
         try {
-          return schema.safeParse(JSON.parse(text));
+          const parsed = schema.safeParse(JSON.parse(text));
+          return parsed.success
+            ? parsed
+            : { success: false as const, reason: describeIssues(parsed.error) };
         } catch {
-          return { success: false as const };
+          return { success: false as const, reason: 'JSON 파싱 실패' };
         }
       };
       const first = await once(full);
@@ -183,7 +223,10 @@ export function createGeminiRunner(generate: GeminiGenerate, budget?: CallBudget
       const second = await once(full);
       const b = parse(second.res.text);
       if (b.success) return { value: b.data as z.infer<S>, usage: sum(first.usage, second.usage) };
-      throw new ProviderError('BAD_OUTPUT', `${req.model}: 스키마에 맞지 않는 JSON`);
+      throw new ProviderError(
+        'BAD_OUTPUT',
+        `${req.model}: 스키마에 맞지 않는 JSON (${'reason' in b ? b.reason : ''})`.slice(0, 400),
+      );
     },
   };
 }
@@ -220,9 +263,8 @@ export function createGeminiStoryModel(opts: {
       const { value, usage } = await run.json(arinStorySchema, {
         model: story,
         messages: arinStoryPrompt(req),
-        thinking: 'high',
+        thinking: 'low',
         maxOutputTokens: MAX_OUTPUT.arinStory,
-        timeoutMs: ARIN_STORY_TIMEOUT_MS,
       });
       return { story: value, usage };
     },
