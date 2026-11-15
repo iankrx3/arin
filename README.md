@@ -1,4 +1,4 @@
-# Eloria
+# Arin
 
 > 상상에서, 글로, 마침내 현실로. — A BRIGHTER YOU AWAITS
 
